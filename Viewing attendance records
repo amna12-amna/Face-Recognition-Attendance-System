@@ -1,0 +1,39 @@
+import sqlite3
+import tkinter as tk
+from tkinter import ttk
+
+# Create the main window
+root = tk.Tk()
+root.title("📋 Attendance Records")
+root.geometry("600x600")
+root.resizable(True, True)
+
+# Connect to the database
+conn = sqlite3.connect("attendance.db")
+cursor = conn.cursor()
+
+# Fetch data from the database
+cursor.execute("SELECT * FROM attendance")
+records = cursor.fetchall()
+
+# Print records for verification
+print(records)  # Check the retrieved records
+
+# Define column headers
+columns = ("Name", "Date", "Time")
+
+# Create a Treeview table
+tree = ttk.Treeview(root, columns=columns, show="headings")
+tree.heading("Name", text="👤 Name")
+tree.heading("Date", text="📅 Date")
+tree.heading("Time", text="⏰ Time")
+
+# Insert data into the table
+for row in records:
+    tree.insert("", tk.END, values=row)
+
+# Format and display the table
+tree.pack(fill=tk.BOTH, expand=True)
+
+# Run the GUI
+root.mainloop()
