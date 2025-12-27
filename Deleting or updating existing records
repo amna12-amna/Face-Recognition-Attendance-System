@@ -1,0 +1,44 @@
+import pickle
+import os
+
+# Path to the encodings file
+ENCODINGS_FILE = "known_faces/face_encodings.pkl"
+
+# Check if the file exists
+if not os.path.exists(ENCODINGS_FILE):
+    print("❌ No encoding file found at:", ENCODINGS_FILE)
+    exit()
+
+# Load existing face data
+with open(ENCODINGS_FILE, "rb") as f:
+    face_data = pickle.load(f)
+
+# List names found
+unique_names = set(face_data["names"])
+print("\n📂 Registered names found:", ", ".join(unique_names))
+
+# Ask for name to delete
+name_to_delete = input("\nEnter the name you want to delete: ").strip()
+
+# Check if name exists
+if name_to_delete not in face_data["names"]:
+    print(f"⚠️ No records found for '{name_to_delete}'.")
+    exit()
+
+# Filter out entries for that name
+filtered_encodings = []
+filtered_names = []
+
+for encoding, stored_name in zip(face_data["encodings"], face_data["names"]):
+    if stored_name != name_to_delete:
+        filtered_encodings.append(encoding)
+        filtered_names.append(stored_name)
+
+# Update and save the file
+face_data["encodings"] = filtered_encodings
+face_data["names"] = filtered_names
+
+with open(ENCODINGS_FILE, "wb") as f:
+    pickle.dump(face_data, f)
+
+print(f"✅ All records for '{name_to_delete}' have been deleted.")
