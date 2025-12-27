@@ -1,0 +1,116 @@
+import cv2
+import face_recognition
+import numpy as np
+import mediapipe as mp
+import pickle
+import os
+import time
+import pyttsx3
+
+# Initialize text-to-speech engine
+engine = pyttsx3.init()
+engine.setProperty("rate", 150)
+
+def speak(text):
+    engine.say(text)
+    engine.runAndWait()
+
+# Initialize MediaPipe Face Mesh
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, refine_landmarks=True)
+
+# Ensure directory exists
+if not os.path.exists("known_faces"):
+    os.makedirs("known_faces")
+
+# Get user's name
+name = input("Enter your name: ").strip()
+speak(f"Hello {name}. Please move your head in all directions: up, down, left, right, and tilt.")
+
+# Prepare
+face_encodings_list = []
+captured_directions = set()
+cap = cv2.VideoCapture(0)
+start_time = time.time()
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(frame_rgb)
+
+    if results.multi_face_landmarks:
+        for landmarks in results.multi_face_landmarks:
+            nose = landmarks.landmark[1]
+            left_eye = landmarks.landmark[33]
+            right_eye = landmarks.landmark[263]
+            chin = landmarks.landmark[152]
+
+            dx = right_eye.x - left_eye.x
+            dy = right_eye.y - left_eye.y
+            roll = np.degrees(np.arctan2(dy, dx))
+
+            dx = nose.x - chin.x
+            dy = nose.y - chin.y
+            pitch = np.degrees(np.arctan2(dy, dx))
+
+            dx = left_eye.x - chin.x
+            dy = right_eye.x - chin.x
+            yaw = np.degrees(np.arctan2(dy, dx))
+
+            # Decide direction
+            if yaw > 15:
+                direction = "LEFT"
+            elif yaw < -15:
+                direction = "RIGHT"
+            elif pitch > 15:
+                direction = "DOWN"
+            elif pitch < -15:
+                direction = "UP"
+            elif abs(roll) > 15:
+                direction = "TILT"
+            else:
+                direction = "STRAIGHT"
+
+            cv2.putText(frame, f"{direction} | Roll: {int(roll)} Pitch: {int(pitch)} Yaw: {int(yaw)}",
+                        (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            # Only capture if direction is new
+            if direction not in captured_directions:
+                face_locations = face_recognition.face_locations(frame)
+                face_encodings = face_recognition.face_encodings(frame, face_locations)
+                if face_encodings:
+                    face_encodings_list.append(face_encodings[0])
+                    captured_directions.add(direction)
+                    print(f"✅ Captured face at {direction}")
+                    time.sleep(1)  # Small delay to give user time to move
+
+    # Show real-time feed
+    cv2.imshow("Face Registration", frame)
+
+    # Exit after all directions are captured or timeout
+    if len(captured_directions) >= 5 or (time.time() - start_time) > 40:
+        break
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+
+# Save face data
+face_data = {"encodings": [], "names": []}
+if os.path.exists("known_faces/face_encodings.pkl"):
+    with open("known_faces/face_encodings.pkl", "rb") as f:
+        face_data = pickle.load(f)
+
+face_data["encodings"].extend(face_encodings_list)
+face_data["names"].extend([name] * len(face_encodings_list))
+
+with open("known_faces/face_encodings.pkl", "wb") as f:
+    pickle.dump(face_data, f)
+
+print(f"🎉 {name} has been registered with {len(face_encodings_list)} diverse face samples!")
+speak(f"Registration complete. Thank you, {name}.")
