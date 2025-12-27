@@ -1,0 +1,190 @@
+import cv2
+import face_recognition
+import os
+import numpy as np
+import pickle
+from datetime import datetime
+from ultralytics import YOLO
+import mediapipe as mp
+from skimage.feature import local_binary_pattern
+import sqlite3
+import pyttsx3
+
+# -------------------------
+# Set up voice engine
+# -------------------------
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)  # Set speech rate
+
+# -------------------------
+# Set up SQLite database
+# -------------------------
+conn = sqlite3.connect("attendance.db")
+cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS attendance (
+    name TEXT,
+    date TEXT,
+    time TEXT
+)
+""")
+conn.commit()
+
+# -------------------------
+# Initial setup
+# -------------------------
+model = YOLO("yolov8n-face.pt")
+
+known_face_encodings = []
+known_face_names = []
+if os.path.exists("known_faces/face_encodings.pkl"):
+    with open("known_faces/face_encodings.pkl", "rb") as f:
+        known = pickle.load(f)
+        known_face_encodings = known["encodings"]
+        known_face_names = known["names"]
+
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
+
+LEFT_EYE = [33, 160, 158, 133, 153, 144]
+RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+EAR_THRESHOLD = 0.21
+CONSEC_FRAMES = 1
+
+LBP_THRESHOLD = 0.000600
+
+blink_frames = {}
+recognized_and_blinked = set()
+attendance = {}
+
+# -------------------------
+# Helper functions
+# -------------------------
+def calculate_ear(eye_points, landmarks, img_width, img_height):
+    pts = [(int(landmarks[i].x * img_width), int(landmarks[i].y * img_height)) for i in eye_points]
+    A = np.linalg.norm(np.array(pts[1]) - np.array(pts[5]))
+    B = np.linalg.norm(np.array(pts[2]) - np.array(pts[4]))
+    C = np.linalg.norm(np.array(pts[0]) - np.array(pts[3]))
+    return (A + B) / (2.0 * C)
+
+def mark_attendance(name):
+    if name not in attendance:
+        now = datetime.now()
+        time_str = now.strftime('%H:%M:%S')
+        date_str = now.strftime('%Y-%m-%d')
+        attendance[name] = (time_str, date_str)
+
+        # Save to CSV
+        with open("attendance.csv", "a") as f:
+            f.write(f"{name},{date_str},{time_str}\n")
+
+        # Save to database
+            cursor.execute("INSERT INTO attendance (name, date, time) VALUES (?, ?, ?)", (name, date_str, time_str))
+            conn.commit()
+
+        print(f"[✓] Attendance marked for {name}")
+        engine.say(f"Attendance marked for {name}")
+        engine.runAndWait()
+    else:
+        print(f"[•] {name} already marked.")
+
+def is_real_face_lbp(gray_face):
+    lbp = local_binary_pattern(gray_face, P=8, R=1, method='uniform')
+    hist, _ = np.histogram(lbp.ravel(), bins=np.arange(0, 257), density=True)
+    variance = np.var(hist)
+    return variance > LBP_THRESHOLD, variance
+
+def has_eye_reflection(gray_face):
+    eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
+    eyes = eye_cascade.detectMultiScale(gray_face)
+    for (ex, ey, ew, eh) in eyes:
+        eye_roi = gray_face[ey:ey+eh, ex:ex+ew]
+        _, thresh = cv2.threshold(eye_roi, 220, 255, cv2.THRESH_BINARY)
+        white_pixels = cv2.countNonZero(thresh)
+        white_ratio = white_pixels / thresh.size
+        return white_ratio < 0.05
+    return False
+
+# -------------------------
+# Main loop
+# -------------------------
+cap = cv2.VideoCapture(0)
+print("🚀 System running... Press Q to quit")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame = cv2.flip(frame, 1)
+    h, w, _ = frame.shape
+
+    results = model(frame, verbose=False)[0]
+
+    for box in results.boxes:
+        if box.conf[0] < 0.5:
+            continue
+
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        face_crop = frame[y1:y2, x1:x2]
+        if face_crop.size == 0:
+            continue
+
+        gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+
+        is_real_lbp, var = is_real_face_lbp(gray_crop)
+        has_reflection = has_eye_reflection(gray_crop)
+
+        if not is_real_lbp or not has_reflection:
+            reason = "Fake Face"
+            if not is_real_lbp:
+                reason += f" (LBP Var: {var:.6f})"
+            if not has_reflection:
+                reason += " (No Eye Reflection)"
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.putText(frame, reason, (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            continue
+
+        face_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+        encodings = face_recognition.face_encodings(face_rgb)
+        name = "Unknown"
+
+        if encodings:
+            face_encoding = encodings[0]
+            matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
+            face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+            best_match = np.argmin(face_distances)
+            if matches and matches[best_match]:
+                name = known_face_names[best_match]
+
+        if name != "Unknown" and name not in recognized_and_blinked:
+            face_mesh_results = face_mesh.process(face_rgb)
+            if face_mesh_results.multi_face_landmarks:
+                landmarks = face_mesh_results.multi_face_landmarks[0].landmark
+                left_ear = calculate_ear(LEFT_EYE, landmarks, face_crop.shape[1], face_crop.shape[0])
+                right_ear = calculate_ear(RIGHT_EYE, landmarks, face_crop.shape[1], face_crop.shape[0])
+                avg_ear = (left_ear + right_ear) / 2.0
+
+                if name not in blink_frames:
+                    blink_frames[name] = 0
+
+                if avg_ear < EAR_THRESHOLD:
+                    blink_frames[name] += 1
+                else:
+                    if blink_frames[name] >= CONSEC_FRAMES:
+                        print(f"[👁] Blink detected for {name}")
+                        mark_attendance(name)
+                        recognized_and_blinked.add(name)
+                    blink_frames[name] = 0
+
+        box_color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+        cv2.putText(frame, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
+
+    cv2.imshow("🧠 Attendance System", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+conn.close()  # Close the database connection after the system ends
